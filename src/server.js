@@ -63,13 +63,13 @@ io.on('connection', async (socket) => {
   await transcriber.connect();
 
   // Receive audio chunks from IoT device
-  socket.on('audio_chunk', (chunk: ArrayBuffer) => {
+  socket.on('audio_chunk', (chunk) => {
     transcriber.stream().writer.write(Buffer.from(chunk));
   });
 
   // Receive image chunks
-  let imageChunks: Buffer[] = [];
-  socket.on('image_chunk', async (chunk: { data: ArrayBuffer, isLast: boolean }) => {
+  let imageChunks = [];
+  socket.on('image_chunk', async (chunk) => {
     imageChunks.push(Buffer.from(chunk.data));
     if (chunk.isLast) {
       const fullImage = Buffer.concat(imageChunks);
@@ -93,15 +93,15 @@ server.listen(PORT, () => {
 
 // ----------------------
 // Mock AI + TTS functions
-async function AIAgent(text: string) {
+async function AIAgent(text) {
   return `You said: ${text}`;
 }
 
-async function textToAudio(text: string) {
+async function textToAudio(text) {
   return Buffer.from(text); // Replace with actual TTS service
 }
 
-async function callAIAgent(imageBuffer: Buffer) {
+async function callAIAgent(imageBuffer) {
   // Mock image processing
   return `Image received with size ${imageBuffer.length} bytes`;
 }
