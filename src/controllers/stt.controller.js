@@ -10,8 +10,8 @@ const run = async () => {
 
   const CONNECTION_PARAMS = {
     sampleRate: 16000,
-    formatTurns: true
-  }
+    formatTurns: true,
+  };
 
   const transcriber = client.streaming.transcriber(CONNECTION_PARAMS);
 
