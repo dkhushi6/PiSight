@@ -72,6 +72,19 @@ io.on('connection', async (socket)=>{
         transcriber.stream().writer.write(chunk);
     });
 
+    let chunks = [];
+
+    socket.on('image_chunk', async(chunk) => {
+    chunks.push(Buffer.from(chunk));
+
+    // Example condition — end of image
+    if (chunk.isLast) {
+        const fullBuffer = Buffer.concat(chunks);
+        const result = await callAIAgent(fullBuffer);
+        chunks = [];
+    }
+    });
+
     socket.on("disconnect", async ()=>{
         console.log('Device Disconnected');
         await transcriber.close();
