@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { Server } from "socket.io";
 import { AssemblyAI } from "assemblyai";
 
-import { ImageAiProcessing } from "./controllers/aiAgent.controller.js";
+import { AiProcessing } from "./controllers/aiAgent.controller.js";
 
 dotenv.config();
 
@@ -52,13 +52,17 @@ io.on("connection", async (socket) => {
     console.log("Transcribed text:", turn.transcript);
 
     // Call AI agent (mock here)
-    const aiResponseText = await ImageAiProcessing(img, turn.transcript);
+    try {
+      const aiResponseText = await AiProcessing(img, turn.transcript);
+      console.log("aiResponseText", aiResponseText);
 
-    // Convert AI response to audio
-    const aiAudioBuffer = await textToAudio(aiResponseText);
+      // Convert AI response to audio
+      const aiAudioBuffer = await textToAudio(aiResponseText);
 
-    // Send audio buffer to client
-    socket.emit("ai_response_audio", aiAudioBuffer);
+      socket.emit("ai_response_audio", aiAudioBuffer);
+    } catch (err) {
+      console.error("Error calling AiProcessing:", err);
+    }
   });
 
   await transcriber.connect();
@@ -85,7 +89,18 @@ io.on("connection", async (socket) => {
   //text chucks
   socket.on("text_message", async (message) => {
     console.log(" Text received:", message);
-    const aiResponse = await ImageAiProcessing(img, message);
+    try {
+      const aiResponseText = await AiProcessing(img, message);
+      console.log("aiResponseText", aiResponseText);
+
+      // Convert AI response to audio
+      const aiAudioBuffer = await textToAudio(aiResponseText);
+      socket.emit("ai_text_response", aiResponseText);
+
+      //   socket.emit("ai_response_audio", aiAudioBuffer);
+    } catch (err) {
+      console.error("Error calling AiProcessing:", err);
+    }
   });
   socket.on("disconnect", async () => {
     console.log("Device disconnected", socket.id);

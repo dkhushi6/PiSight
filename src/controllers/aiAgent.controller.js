@@ -1,6 +1,6 @@
 import { google } from "@ai-sdk/google";
 import { generateText } from "ai";
-export async function ImageAiProcessing(img, message) {
+export async function AiProcessing(img, message) {
   console.log("IMGE FROM THE CONTROLLER ", img ? img : "No image");
   const messages = [
     { role: "user", content: [{ type: "text", text: message }] },
