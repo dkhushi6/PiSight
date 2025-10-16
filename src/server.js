@@ -14,7 +14,7 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 10e6, // 10MB for large images
+  maxHttpBufferSize: 50e6, // 50MB in case large audio/images
 });
 
 const PORT = process.env.PORT || 5000;
@@ -29,8 +29,16 @@ const googleAI = new GoogleGenAI({
   apiKey: process.env.GOOGLE_API_KEY,
 });
 
+// ----------------------------
 // 🧠 TTS Helper Functions
-async function saveWaveFile(filename, pcmData, channels = 1, rate = 24000, sampleWidth = 2) {
+// ----------------------------
+async function saveWaveFile(
+  filename,
+  pcmData,
+  channels = 1,
+  rate = 24000,
+  sampleWidth = 2
+) {
   return new Promise((resolve, reject) => {
     const writer = new wav.FileWriter(filename, {
       channels,
@@ -62,12 +70,13 @@ async function textToAudio(text) {
       },
     });
 
-    const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const data =
+      response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!data) throw new Error("No audio data returned from Gemini API.");
 
     const audioBuffer = Buffer.from(data, "base64");
 
-    // Optional: Save for debugging (disable in production)
+    // Optional: Save for debugging
     if (process.env.DEBUG_SAVE_AUDIO === "true") {
       const fileName = `tts_output_${Date.now()}.wav`;
       await saveWaveFile(fileName, audioBuffer);
@@ -77,146 +86,112 @@ async function textToAudio(text) {
     return audioBuffer;
   } catch (error) {
     console.error("Error in textToAudio:", error);
-    throw error; // Propagate error for better handling
+    throw error;
   }
 }
 
 // ----------------------------
-// 🔊 Main Server Logic
+// 🔊 Express Routes
 // ----------------------------
 app.get("/", (req, res) => {
-  res.json({ 
-    status: "online", 
+  res.json({
+    status: "online",
     service: "PISIGHT Backend",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Health check endpoint
 app.get("/health", (req, res) => {
-  res.json({ 
+  res.json({
     status: "healthy",
-    connections: io.engine.clientsCount 
+    connections: io.engine.clientsCount,
   });
 });
 
-io.on("connection", async (socket) => {
+// ----------------------------
+// 🔌 Socket.IO Connection
+// ----------------------------
+io.on("connection", (socket) => {
   console.log(`[${new Date().toISOString()}] Device connected: ${socket.id}`);
 
-  // Store session-specific data
   const sessionData = {
     image: null,
     imageChunks: [],
-    transcriber: null,
     isProcessing: false,
   };
 
-  // Initialize STT transcriber
-  const CONNECTION_PARAMS = {
-    sampleRate: 16000,
-    formatTurns: true,
-  };
+  // ------------------------
+  // Full audio handler
+  // ------------------------
+  socket.on("audio_full", async (arrayBuffer) => {
+    if (sessionData.isProcessing) {
+      socket.emit("error", {
+        type: "busy",
+        message: "Still processing previous request",
+      });
+      return;
+    }
+    sessionData.isProcessing = true;
 
-  try {
-    sessionData.transcriber = assemblyClient.streaming.transcriber(CONNECTION_PARAMS);
+    try {
+      const audioBuffer = Buffer.from(arrayBuffer);
+      console.log(
+        `[${socket.id}] Received full audio: ${audioBuffer.length} bytes`
+      );
+      // Upload buffer to AssemblyAI first
+      const uploadResponse = await assemblyClient.upload(audioBuffer); // returns { upload_url }
 
-    sessionData.transcriber.on("open", ({ id }) => {
-      console.log(`[${socket.id}] STT session opened: ${id}`);
-      socket.emit("stt_ready", { sessionId: id });
-    });
+      // Create transcript using the uploaded URL
+      const transcriptResponse = await assemblyClient.transcripts.create({
+        audio_url: uploadResponse.upload_url,
+      });
 
-    sessionData.transcriber.on("error", (error) => {
-      console.error(`[${socket.id}] STT Error:`, error);
-      socket.emit("error", { type: "stt", message: error.message });
-    });
+      // Wait for transcript completion
+      const completedTranscript = await assemblyClient.transcripts.wait(
+        transcriptResponse.id
+      );
+      const transcript = completedTranscript.text || "";
 
-    sessionData.transcriber.on("close", (code, reason) => {
-      console.log(`[${socket.id}] STT session closed:`, code, reason);
-    });
+      console.log(`[${socket.id}] Transcription:`, transcript);
 
-    // Handle transcription turns
-    sessionData.transcriber.on("turn", async (turn) => {
-      if (!turn.transcript || sessionData.isProcessing) return;
-      
-      console.log(`[${socket.id}] Transcribed:`, turn.transcript);
-      sessionData.isProcessing = true;
+      // Process with AI
+      const aiResponseText = await AiProcessing(sessionData.image, transcript);
+      console.log(`[${socket.id}] AI Response:`, aiResponseText);
 
-      try {
-        // Process with AI (vision + text)
-        const aiResponseText = await AiProcessing(
-          sessionData.image, 
-          turn.transcript
-        );
-        console.log(`[${socket.id}] AI Response:`, aiResponseText);
+      // Convert AI response to audio
+      const aiAudioBuffer = await textToAudio(aiResponseText);
 
-        // Convert to audio
-        const aiAudioBuffer = await textToAudio(aiResponseText);
-
-        // Send both text and audio to client
-        socket.emit("ai_response", {
-          text: aiResponseText,
-          audio: aiAudioBuffer,
-          timestamp: Date.now(),
-        });
-
-      } catch (err) {
-        console.error(`[${socket.id}] Error in AI processing:`, err);
-        socket.emit("error", { 
-          type: "ai_processing", 
-          message: "Failed to process your request" 
-        });
-      } finally {
-        sessionData.isProcessing = false;
-      }
-    });
-
-    await sessionData.transcriber.connect();
-
-  } catch (err) {
-    console.error(`[${socket.id}] Failed to initialize STT:`, err);
-    socket.emit("error", { type: "initialization", message: err.message });
-  }
-
-  // 🎤 Handle audio streaming
-  socket.on("audio_chunk", (chunk) => {
-    if (sessionData.transcriber && sessionData.transcriber.stream()) {
-      try {
-        sessionData.transcriber.stream().writer.write(Buffer.from(chunk));
-      } catch (err) {
-        console.error(`[${socket.id}] Error writing audio chunk:`, err);
-      }
+      socket.emit("ai_response", {
+        text: aiResponseText,
+        audio: aiAudioBuffer.toString("base64"),
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      console.error(`[${socket.id}] Error processing full audio:`, err);
+      socket.emit("error", { type: "full_audio", message: err.message });
+    } finally {
+      sessionData.isProcessing = false;
     }
   });
 
-  // 🎤 Audio stream control
-  socket.on("audio_start", () => {
-    console.log(`[${socket.id}] Audio stream started`);
-    sessionData.isProcessing = false;
-  });
-
-  socket.on("audio_end", () => {
-    console.log(`[${socket.id}] Audio stream ended`);
-  });
-
-  // 📸 Handle image upload
-  socket.on("image_chunk", async (data) => {
+  // ------------------------
+  // Image upload (chunked)
+  // ------------------------
+  socket.on("image_chunk", (data) => {
     try {
       const bufferChunk = Buffer.from(data.chunk);
       sessionData.imageChunks.push(bufferChunk);
 
       if (data.isLast) {
-        const fullBuffer = Buffer.concat(sessionData.imageChunks);
-        sessionData.image = fullBuffer;
-        
-        console.log(`[${socket.id}] Image received: ${fullBuffer.length} bytes`);
-        
-        socket.emit("image_received", { 
-          size: fullBuffer.length,
-          timestamp: Date.now() 
-        });
-        
-        // Clear chunks
+        sessionData.image = Buffer.concat(sessionData.imageChunks);
         sessionData.imageChunks = [];
+        console.log(
+          `[${socket.id}] Image received: ${sessionData.image.length} bytes`
+        );
+        socket.emit("image_received", {
+          size: sessionData.image.length,
+          timestamp: Date.now(),
+        });
       }
     } catch (err) {
       console.error(`[${socket.id}] Error processing image:`, err);
@@ -224,74 +199,64 @@ io.on("connection", async (socket) => {
     }
   });
 
-  // 💬 Handle direct text messages
+  // ------------------------
+  // Text messages
+  // ------------------------
   socket.on("text_message", async (message) => {
     if (sessionData.isProcessing) {
-      socket.emit("error", { 
-        type: "busy", 
-        message: "Still processing previous request" 
+      socket.emit("error", {
+        type: "busy",
+        message: "Still processing previous request",
       });
       return;
     }
 
-    console.log(`[${socket.id}] Text received:`, message);
     sessionData.isProcessing = true;
-
     try {
       const aiResponseText = await AiProcessing(sessionData.image, message);
-      console.log(`[${socket.id}] AI Response:`, aiResponseText);
-
       const aiAudioBuffer = await textToAudio(aiResponseText);
 
       socket.emit("ai_response", {
         text: aiResponseText,
-        audio: aiAudioBuffer,
+        audio: aiAudioBuffer.toString("base64"),
         timestamp: Date.now(),
       });
-
     } catch (err) {
-      console.error(`[${socket.id}] Error processing text:`, err);
-      socket.emit("error", { 
-        type: "text_processing", 
-        message: "Failed to process your message" 
-      });
+      socket.emit("error", { type: "text_processing", message: err.message });
     } finally {
       sessionData.isProcessing = false;
     }
   });
 
-  // 🧹 Clear image from session
+  // ------------------------
+  // Clear image
+  // ------------------------
   socket.on("clear_image", () => {
     sessionData.image = null;
-    console.log(`[${socket.id}] Image cleared`);
     socket.emit("image_cleared");
   });
 
-  // 🔌 Handle disconnection
-  socket.on("disconnect", async () => {
+  // ------------------------
+  // Disconnect
+  // ------------------------
+  socket.on("disconnect", () => {
     console.log(`[${socket.id}] Device disconnected`);
-    
-    if (sessionData.transcriber) {
-      try {
-        await sessionData.transcriber.close();
-      } catch (err) {
-        console.error(`[${socket.id}] Error closing transcriber:`, err);
-      }
-    }
-
-    // Clear session data
     sessionData.image = null;
     sessionData.imageChunks = [];
   });
 });
 
-// Error handling middleware
+// ----------------------------
+// Error middleware
+// ----------------------------
 app.use((err, req, res, next) => {
   console.error("Express error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
 
+// ----------------------------
 // Graceful shutdown
+// ----------------------------
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, closing server...");
   server.close(() => {

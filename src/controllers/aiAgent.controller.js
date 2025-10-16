@@ -33,3 +33,40 @@ export async function AiProcessing(img, message) {
   console.log("AI RESPONSE:", resultText);
   return resultText;
 }
+
+// 🎙️ Gemini Text-to-Speech
+export async function textToAudio(text) {
+  console.log("AI RESPONSE TEXT IS", text);
+  try {
+    const response = await googleAI.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: "Kore" },
+          },
+        },
+      },
+    });
+
+    const data =
+      response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!data) throw new Error("No audio data returned from Gemini API.");
+
+    const audioBuffer = Buffer.from(data, "base64");
+
+    // Optional: Save for debugging
+    if (process.env.DEBUG_SAVE_AUDIO === "true") {
+      const fileName = `tts_output_${Date.now()}.wav`;
+      await saveWaveFile(fileName, audioBuffer);
+      console.log("TTS audio saved:", fileName);
+    }
+
+    return audioBuffer;
+  } catch (error) {
+    console.error("Error in textToAudio:", error);
+    throw error;
+  }
+}
