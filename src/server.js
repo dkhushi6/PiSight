@@ -139,17 +139,27 @@ io.on("connection", (socket) => {
         `[${socket.id}] Received full audio: ${audioBuffer.length} bytes`
       );
       // Upload buffer to AssemblyAI first
-      const uploadResponse = await assemblyClient.upload(audioBuffer); // returns { upload_url }
+      const uploadResponse = await assemblyClient.files.upload(audioBuffer);
+      console.log(uploadResponse);
 
       // Create transcript using the uploaded URL
       const transcriptResponse = await assemblyClient.transcripts.create({
-        audio_url: uploadResponse.upload_url,
+        audio_url: uploadResponse,
       });
 
       // Wait for transcript completion
-      const completedTranscript = await assemblyClient.transcripts.wait(
-        transcriptResponse.id
-      );
+      // Poll until transcription is complete
+      let completedTranscript;
+      while (true) {
+        completedTranscript = await assemblyClient.transcripts.get(
+          transcriptResponse.id
+        );
+        if (completedTranscript.status === "completed") break;
+        if (completedTranscript.status === "error")
+          throw new Error(completedTranscript.error);
+        await new Promise((r) => setTimeout(r, 3000)); // wait 3s before checking again
+      }
+
       const transcript = completedTranscript.text || "";
 
       console.log(`[${socket.id}] Transcription:`, transcript);
